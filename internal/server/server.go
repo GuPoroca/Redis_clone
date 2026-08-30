@@ -5,7 +5,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
+	"time"
 
 	"redis-clone/internal/resp"
 	"redis-clone/internal/store"
@@ -98,7 +100,6 @@ func parseCommand(v resp.Value) ([]string, error) {
 		}
 		args[i] = elem.Bulk
 	}
-	log.Printf("command: %s", args)
 	return args, nil
 }
 
@@ -146,6 +147,44 @@ func (s *Server) dispatch(args []string) resp.Value {
 		}
 		count := s.db.Exists(args[1:]...)
 		return resp.IntegerValue(int64(count))
+	case "EXPIRE":
+		if len(args) != 3 {
+			return resp.ErrorValue("ERR wrong number of arguments for 'expire' command")
+		}
+		seconds, err := strconv.Atoi(args[2])
+		if err != nil {
+			return resp.ErrorValue("ERR value is not an integer or out of range")
+		}
+		ok := s.db.Expire(args[1], time.Duration(seconds)*time.Second)
+		if !ok {
+			return resp.IntegerValue(0)
+		}
+		return resp.IntegerValue(1)
+	case "TTL":
+		if len(args) != 2 {
+			return resp.ErrorValue("ERR wrong number of arguments for 'ttl' command")
+		}
+		remaining, exists, hasExpiry := s.db.TTL(args[1])
+		if !exists {
+			return resp.IntegerValue(-2) // real Redis convention: key doesn't exist
+		}
+		if !hasExpiry {
+			return resp.IntegerValue(-1) // real Redis convention: exists, but permanent
+		}
+		seconds := int64(remaining.Seconds())
+		if seconds < 0 {
+			seconds = 0 // guards a race where the key expires between TTL's check and this line
+		}
+		return resp.IntegerValue(seconds)
+	case "PERSIST":
+		if len(args) != 2 {
+			return resp.ErrorValue("ERR wrong number of arguments for 'persist' command")
+		}
+		ok := s.db.Persist(args[1])
+		if !ok {
+			return resp.IntegerValue(0)
+		}
+		return resp.IntegerValue(1)
 	default:
 		return resp.ErrorValue("ERR unknown command '" + name + "'")
 	}
