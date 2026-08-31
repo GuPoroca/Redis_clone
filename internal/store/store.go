@@ -1,6 +1,10 @@
 package store
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -190,4 +194,98 @@ func (s *Store) runActiveExpiry(interval time.Duration) {
 	for range ticker.C {
 		s.purgeExpired()
 	}
+}
+
+// persistedEntry is the on-disk shape of an entry. It's a separate
+// type from entry rather than reusing it directly for two reasons:
+// entry's fields are unexported (encoding/json can't see them), and
+// keeping the wire/file format as its own type means the internal
+// entry struct is free to change shape later without silently
+// breaking the file format of snapshots already on disk.
+//
+// ExpiresAt is a *time.Time (not time.Time) specifically so
+// encoding/json's omitempty can distinguish "no expiry" from "has an
+// expiry" — a plain time.Time's zero value doesn't trigger omitempty,
+// but a nil pointer does, so a permanent key serializes cleanly
+// without an expires_at field at all.
+type persistedEntry struct {
+	Value     string     `json:"value"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// SaveToFile writes the current store contents to path as JSON.
+// Already-expired keys are skipped — no point persisting garbage
+// that lazy/active expiry would just delete again on the next read
+// anyway.
+func (s *Store) SaveToFile(path string) error {
+	s.mu.RLock()
+	snapshot := make(map[string]persistedEntry, len(s.data))
+	now := time.Now()
+	for k, e := range s.data {
+		if isExpired(e, now) {
+			continue
+		}
+		pe := persistedEntry{Value: e.value}
+		if !e.expiresAt.IsZero() {
+			t := e.expiresAt
+			pe.ExpiresAt = &t
+		}
+		snapshot[k] = pe
+	}
+	s.mu.RUnlock()
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal snapshot: %w", err)
+	}
+
+	// Atomic write: write to a temp file in the same directory, then
+	// rename over the real path. Rename is atomic on POSIX
+	// filesystems, so a crash mid-write never leaves a corrupt
+	// snapshot behind — worst case, the old file is still intact and
+	// loadable.
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write temp snapshot: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename snapshot into place: %w", err)
+	}
+	return nil
+}
+
+// LoadFromFile replaces the store's contents with what's saved at
+// path. A missing file is not an error — it just means this is the
+// first run, nothing to load yet.
+func (s *Store) LoadFromFile(path string) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read snapshot: %w", err)
+	}
+
+	var snapshot map[string]persistedEntry
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("unmarshal snapshot: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for k, pe := range snapshot {
+		e := entry{value: pe.Value}
+		if pe.ExpiresAt != nil {
+			if pe.ExpiresAt.Before(now) {
+				// This key expired while the server was down —
+				// don't bother resurrecting it just to have active
+				// expiry delete it again moments later.
+				continue
+			}
+			e.expiresAt = *pe.ExpiresAt
+		}
+		s.data[k] = e
+	}
+	return nil
 }

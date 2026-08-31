@@ -13,17 +13,58 @@ import (
 	"redis-clone/internal/store"
 )
 
-// Server now owns a Store, created once at startup and shared across
-// every connection's goroutine. The Store's internal mutex is what
-// makes that sharing safe — the server itself doesn't need to know
-// or care about locking, it just calls methods on it.
+// Server owns a Store (shared across every connection's goroutine)
+// plus the path where it persists to disk. ln is kept so Close() can
+// shut down the listener from outside the Accept loop — that's what
+// makes graceful shutdown possible.
 type Server struct {
-	addr string
-	db   *store.Store
+	addr         string
+	db           *store.Store
+	snapshotPath string
+	ln           net.Listener
 }
 
-func New(addr string) *Server {
-	return &Server{addr: addr, db: store.New()}
+func New(addr, snapshotPath string) *Server {
+	return &Server{addr: addr, db: store.New(), snapshotPath: snapshotPath}
+}
+
+// LoadSnapshot restores the store from disk. Call this once, before
+// ListenAndServe, so data is in place before any client can connect.
+func (s *Server) LoadSnapshot() error {
+	return s.db.LoadFromFile(s.snapshotPath)
+}
+
+// SaveSnapshot writes the store to disk right now.
+func (s *Server) SaveSnapshot() error {
+	return s.db.SaveToFile(s.snapshotPath)
+}
+
+// StartPeriodicSnapshot begins saving on a fixed interval in the
+// background — the backstop against a hard kill (SIGKILL) that
+// signal handling can never catch. Fire-and-forget: errors are
+// logged, not returned, since there's no caller left to hand them to
+// once this goroutine is running on its own.
+func (s *Server) StartPeriodicSnapshot(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := s.SaveSnapshot(); err != nil {
+				log.Printf("periodic snapshot failed: %v", err)
+			}
+		}
+	}()
+}
+
+// Close shuts down the listener, which causes the Accept() loop in
+// ListenAndServe to unblock and return nil (see the net.ErrClosed
+// check below) — that's the mechanism graceful shutdown uses to let
+// main() get control back and save one last snapshot.
+func (s *Server) Close() error {
+	if s.ln == nil {
+		return nil
+	}
+	return s.ln.Close()
 }
 
 func (s *Server) ListenAndServe() error {
@@ -31,6 +72,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
+	s.ln = ln
 	defer ln.Close()
 
 	log.Printf("listening on %s", s.addr)
