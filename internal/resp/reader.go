@@ -110,6 +110,13 @@ func (r *Reader) readBulkString() (Value, error) {
 	if _, err := io.ReadFull(r.r, buf); err != nil {
 		return Value{}, err
 	}
+	// io.ReadFull guarantees that we received two bytes after the payload,
+	// but it does not guarantee that they are RESP's required CRLF delimiter.
+	// Validate them so malformed input cannot silently consume bytes belonging
+	// to a later value in the stream.
+	if buf[length] != '\r' || buf[length+1] != '\n' {
+		return Value{}, fmt.Errorf("resp: bulk string missing CRLF terminator")
+	}
 	return Value{Type: BulkString, Bulk: string(buf[:length])}, nil
 }
 
