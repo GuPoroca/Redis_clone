@@ -19,8 +19,18 @@ func main() {
 
 	srv := server.New(*addr, *snapshotPath)
 
-	if err := srv.LoadSnapshot(); err != nil {
-		log.Printf("warning: could not load snapshot: %v", err)
+if err := srv.LoadSnapshot(); err != nil {
+		// A missing snapshot file is not an error here (LoadFromFile
+		// already returns nil for that case) — reaching this branch
+		// means the file exists but is corrupt/unreadable. Starting
+		// anyway would mean running with a silently empty store, and
+		// the next save (periodic or on shutdown) would then
+		// overwrite the corrupt-but-possibly-partially-recoverable
+		// file with an empty one, destroying it for good. Refuse to
+		// start instead — same philosophy real Redis uses for a
+		// corrupt AOF/RDB file: fail loudly, require a human to fix
+		// or remove the bad snapshot before proceeding.
+		log.Fatalf("could not load snapshot %q: %v — fix or remove this file to start with an empty store", *snapshotPath, err)
 	}
 
 	srv.StartPeriodicSnapshot(*snapshotInterval)

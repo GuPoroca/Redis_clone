@@ -7,6 +7,22 @@ import (
 	"strconv"
 )
 
+// Sanity limits on what a single incoming header can claim before
+// we trust it enough to allocate memory for it. Without these, a
+// client can send a ~15-byte header like "$2000000000\r\n" and never
+// send another byte — and the reader would still attempt to
+// allocate a multi-gigabyte buffer for it immediately, before ever
+// discovering there's no data to back that claim up. That's a
+// massive cost asymmetry (attacker sends 15 bytes, server attempts a
+// multi-GB allocation) and a real resource-exhaustion vector, not a
+// theoretical one. Real Redis has the equivalent protection via its
+// configurable proto-max-bulk-len; these are simpler fixed constants
+// serving the same purpose.
+const (
+	maxBulkLen  = 512 * 1024 * 1024 // 512MB — matches real Redis's default proto-max-bulk-len
+	maxArrayLen = 1024 * 1024       // 1M elements — generous for any real command's argument count
+)
+
 // Reader parses RESP values from a stream. It wraps a bufio.Reader
 // so it can read byte-by-byte and line-by-line cheaply.
 type Reader struct {
@@ -83,6 +99,12 @@ func (r *Reader) readBulkString() (Value, error) {
 		// GET on a missing key. No trailing data or \r\n follows it.
 		return NullBulkString(), nil
 	}
+	if length < -1 {
+		return Value{}, fmt.Errorf("resp: invalid bulk string length %d", length)
+	}
+	if length > maxBulkLen {
+		return Value{}, fmt.Errorf("resp: bulk string length %d exceeds max allowed %d", length, maxBulkLen)
+	}
 
 	buf := make([]byte, length+2) // +2 for the trailing \r\n
 	if _, err := io.ReadFull(r.r, buf); err != nil {
@@ -102,6 +124,12 @@ func (r *Reader) readArray() (Value, error) {
 	}
 	if count == -1 {
 		return Value{Type: Array, IsNull: true}, nil
+	}
+	if count < -1 {
+		return Value{}, fmt.Errorf("resp: invalid array length %d", count)
+	}
+	if count > maxArrayLen {
+		return Value{}, fmt.Errorf("resp: array length %d exceeds max allowed %d", count, maxArrayLen)
 	}
 
 	elements := make([]Value, count)

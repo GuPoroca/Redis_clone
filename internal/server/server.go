@@ -153,7 +153,10 @@ func (s *Server) dispatch(args []string) resp.Value {
 	name := strings.ToUpper(args[0])
 	switch name {
 	case "PING":
-		if len(args) > 1 {
+		if len(args) > 2 {
+			return resp.ErrorValue("ERR wrong number of arguments for 'ping' command")
+		}
+		if len(args) == 2 {
 			return resp.BulkStringValue(args[1])
 		}
 		return resp.SimpleStringValue("PONG")
