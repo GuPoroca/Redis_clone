@@ -54,6 +54,18 @@ func New() *Store {
 	return s
 }
 
+// newWithActiveExpiryInterval exists so tests can control how often
+// (or how rarely) the active sweep runs — e.g. a very long interval
+// effectively disables it for the duration of a test, letting a test
+// prove lazy expiry specifically, in isolation from the background
+// sweep. Unexported deliberately: this is a testing seam, not
+// something a real caller should ever need to tune.
+func newWithActiveExpiryInterval(interval time.Duration) *Store {
+	s := &Store{data: make(map[string]entry)}
+	go s.runActiveExpiry(interval)
+	return s
+}
+
 func (s *Store) Set(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
